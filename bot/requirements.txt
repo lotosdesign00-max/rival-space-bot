@@ -1,0 +1,4 @@
+aiogram>=3.22.0
+httpx>=0.28.1
+aiocryptopay==0.4.8
+python-dotenv>=1.0.1
