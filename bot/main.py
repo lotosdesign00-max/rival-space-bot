@@ -1082,7 +1082,6 @@ await send_order_step(message, user_id)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 dp.include_router(router)
-app = FastAPI()
 @("/")
 async def telegram_webhook(request: Request):
 """Принимает входящие обновления от Telegram."""
