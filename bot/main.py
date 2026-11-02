@@ -65,7 +65,8 @@ CACHED_WELCOME_VIDEO_ID: str | None = None
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not set in bot/.env")
 if not CRYPTOPAY_TOKEN:
-    raise RuntimeError("CRYPTOPAY_API_TOKEN is not set in bot/.env")
+    # Не критично: бот работает, просто оплата через CryptoBot будет недоступна
+    logging.getLogger(__name__).warning("CRYPTOPAY_API_TOKEN is not set — CryptoBot payments are disabled")
 
 cryptopay: AioCryptoPay | None = None
 router = Router()
@@ -232,6 +233,8 @@ def instant_ack(handler):
 def get_cryptopay() -> AioCryptoPay:
     """Create CryptoPay client inside an active asyncio loop."""
     global cryptopay
+    if not CRYPTOPAY_TOKEN:
+        raise RuntimeError("CryptoBot payments are disabled: CRYPTOPAY_API_TOKEN is not set")
     if cryptopay is None:
         cryptopay = AioCryptoPay(token=CRYPTOPAY_TOKEN)
     return cryptopay
