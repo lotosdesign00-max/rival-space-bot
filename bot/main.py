@@ -9,19 +9,23 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# 1. Сначала загружаем окружение
 load_dotenv(Path(__file__).with_name(".env"))
 
+# 2. МГНОВЕННО создаем объект для Vercel, чтобы он его точно нашел
+from fastapi import FastAPI, Request
+app = FastAPI()
+
+# 3. А вот теперь идут все остальные твои импорты aiogram и базы данных
 from aiocryptopay import AioCryptoPay
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import FSInputFile, Message, Update  # Добавили Update для Webhook
+from aiogram.types import FSInputFile, Message, Update
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-# === ИМПОРТЫ ДЛЯ ВЕБ-СЕРВЕРА VERCEL ===
-from fastapi import FastAPI, Request
-
 from database import db
+# ... (весь остальной код без изменений до самого конца)
 from kb import (
     main_menu_kb,
     profile_kb,
