@@ -9,21 +9,23 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# 1. Загрузка окружения
+# 1. Загружаем окружение из .env (если он есть локально)
 load_dotenv(Path(__file__).with_name(".env"))
 
-# 2. Мгновенная инициализация FastAPI для экспорта сборщиком Vercel
+# 2. ЖЕЛЕЗОБЕТОННО создаем объект для Vercel на самом верху!
 from fastapi import FastAPI, Request
 app = FastAPI()
 
+# 3. Только ПОСЛЕ этого идут все остальные импорты aiogram и базы данных
 from aiocryptopay import AioCryptoPay
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import FSInputFile, Message, Update  # Добавлен Update для обработки вебхуков
+from aiogram.types import FSInputFile, Message, Update
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 from database import db
+# ... (весь остальной код бота без изменений до самого конца)
 from kb import (
     main_menu_kb,
     profile_kb,
