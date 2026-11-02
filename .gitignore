@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 .env
+bot/assets/welcome_video_id.txt

@@ -22,46 +22,26 @@ Copy-Item .env.example .env
 
 To stop the bot after running it in terminal, press `Ctrl+C`.
 
-## Railway Deploy
+## Render Deploy
 
-Recommended setup: create a separate Railway service from the same GitHub repository and set the service root directory to `bot`.
+`render.yaml` в корне репозитория уже всё настраивает.
 
-Railway reads `bot/railway.json` and starts the worker with:
+1. Render → **New → Blueprint** → выбери репозиторий → **Apply**.
+   (Или вручную: **New → Web Service**, Root Directory `bot`, Build `pip install -r requirements.txt`, Start `python main.py`, Health Check Path `/health`, переменная `PYTHON_VERSION=3.12.8`.)
+2. Заполни переменные: `TELEGRAM_BOT_TOKEN`, `CRYPTOPAY_API_TOKEN`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `ADMIN_TELEGRAM_ID`, `WEBAPP_URL`.
+3. Дождись деплоя. Бот сам ставит вебхук на `https://<сервис>.onrender.com/webhook` — вручную ничего открывать не нужно.
 
-```bash
-python main.py
-```
-
-Python is pinned with `.python-version` / `runtime.txt` to `3.12.0` to avoid package build issues on newer Python versions.
-
-### Railway Variables
-
-Add these in Railway service `Variables`. Do not commit real values to GitHub.
-
-```env
-TELEGRAM_BOT_TOKEN=
-PUBLIC_BOT_USERNAME=rivaldesign_bot
-SUPABASE_URL=
-SUPABASE_SERVICE_KEY=
-SUPABASE_SECRET_KEY=
-CRYPTOPAY_API_TOKEN=
-CRYPTOPAY_ASSET=USDT
-WEBAPP_URL=
-WELCOME_VIDEO_ID=
-WELCOME_VIDEO_PATH=assets/welcome.mp4
-```
-
-### Expected Logs
-
-After deploy, Railway logs should show:
+Ожидаемый лог:
 
 ```text
-Rival Design Bot started
-Start polling
-Run polling for bot @rivaldesign_bot
+Rival Design Bot started: webhook mode for @rivaldesign_bot -> https://....onrender.com/webhook
 ```
 
-Run only one polling instance for the same Telegram bot token. If Railway is running the bot, stop the local terminal version.
+Режим выбирается сам: если есть `RENDER_EXTERNAL_URL` (Render ставит его автоматически) или `WEBHOOK_URL` — вебхук, иначе polling.
+
+> Не запускай бота локально, пока он работает на Render: локальный запуск (polling) снимает вебхук. После локального теста нажми на Render **Manual Deploy → Restart service**.
+
+> Бесплатный план засыпает после 15 минут без запросов. Первое сообщение после сна обрабатывается ~30–60 сек. Чтобы не засыпал — пингуй `https://<сервис>.onrender.com/health` раз в 10 минут (UptimeRobot / cron-job.org) или перейди на Starter.
 
 ## Checks
 

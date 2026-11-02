@@ -1,0 +1,34 @@
+# Render Blueprint: New → Blueprint → выбрать этот репозиторий.
+services:
+  - type: web
+    name: rival-space-bot
+    runtime: python
+    rootDir: bot
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: CRYPTOPAY_API_TOKEN
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: ADMIN_TELEGRAM_ID
+        sync: false
+      - key: WEBAPP_URL
+        sync: false
+      - key: PUBLIC_BOT_USERNAME
+        value: rivaldesign_bot
+      - key: CRYPTOPAY_ASSET
+        value: USDT
+      - key: WELCOME_VIDEO_PATH
+        value: assets/welcome.mp4
+      - key: WEBHOOK_SECRET
+        generateValue: true
