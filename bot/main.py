@@ -9,23 +9,21 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# 1. Сначала загружаем окружение
+# 1. Загрузка окружения
 load_dotenv(Path(__file__).with_name(".env"))
 
-# 2. МГНОВЕННО создаем объект для Vercel, чтобы он его точно нашел
+# 2. Мгновенная инициализация FastAPI для экспорта сборщиком Vercel
 from fastapi import FastAPI, Request
 app = FastAPI()
 
-# 3. А вот теперь идут все остальные твои импорты aiogram и базы данных
 from aiocryptopay import AioCryptoPay
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import FSInputFile, Message, Update
+from aiogram.types import FSInputFile, Message, Update  # Добавлен Update для обработки вебхуков
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 from database import db
-# ... (весь остальной код без изменений до самого конца)
 from kb import (
     main_menu_kb,
     profile_kb,
@@ -311,8 +309,8 @@ async def send_main_menu(message: Message):
     elif WELCOME_VIDEO_ID:
         video = WELCOME_VIDEO_ID
     elif cache_path.exists():
-        cached = cache_path.read_text(encoding="utf-8").strip()
 Используйте код с осторожностью.
+cached = cache_path.read_text(encoding="utf-8").strip()
 if cached:
 CACHED_WELCOME_VIDEO_ID = cached
 video = cached
@@ -331,7 +329,7 @@ caption=text,
 parse_mode=ParseMode.HTML,
 reply_markup=main_menu_kb(),
 )
-if isinstance(video, FSInputFile) and :
+if isinstance(video, FSInputFile) and sent.video:
 CACHED_WELCOME_VIDEO_ID = sent.video.file_id
 try:
 cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -440,7 +438,7 @@ def build_admin_order_text(order: dict, session: dict, user) -> str:
 category_code = session["category"]
 category_name = ORDER_CATEGORIES.get(category_code, "Заказ")
 price = ORDER_PRICES_RUB.get(category_code, Decimal("1200"))
-username = escape(f"@{user.username}" if user.username else (user.full_name or str()))
+username = escape(f"@{user.username}" if user.username else (user.full_name or str(user.id)))
 order_number = escape(str(order.get("order_number") or "новый заказ"))
 brief = build_order_brief(session)
 if len(brief) > 2600:
@@ -461,7 +459,7 @@ category_name = ORDER_CATEGORIES.get(session["category"], "Заказ")
 brief = build_order_brief(session)
 if len(brief) > 1800:
 brief = brief[:1800].rstrip() + "\n...ТЗ обрезано, полная версия в Supabase."
-username = f"@{user.username}" if user.username else (user.full_name or str())
+username = f"@{user.username}" if user.username else (user.full_name or str(user.id))
 return (
 "Новый заказ в Rival Space\n\n"
 f"{order.get('order_number') or 'новый заказ'}\n"
@@ -546,7 +544,7 @@ text=brief,
 except Exception:
 logger.exception("Could not create order chat message for order_id=%s", order["id"])
 await notify_admin(
-,
+callback.bot,
 build_admin_order_text(order, session, callback.from_user),
 build_admin_order_fallback(order, session, callback.from_user),
 )
@@ -736,11 +734,11 @@ await message.answer(result, parse_mode=ParseMode.HTML)
 async def cmd_admin_test(message: Message):
 if not ADMIN_TELEGRAM_ID:
 await message.answer(
-"ADMIN_TELEGRAM_ID не задан в окружении бота. Добавь его в Vercel Environment Variables."
+"ADMIN_TELEGRAM_ID не задан в окружении бота. Добавь его в Environment Variables."
 )
 return
 sent = await notify_admin(
-,
+message.bot,
 "Тест уведомлений Rival Space\n\n"
 f"Команду запустил: {message.from_user.id}\n"
 "Если ты видишь это сообщение, админ-уведомления работают.",
@@ -749,7 +747,7 @@ if sent:
 await message.answer("Тестовое уведомление отправлено админу.")
 else:
 await message.answer("Не смог отправить тест админу.")
-@router.callback_query( == "menu_order")
+@router.callback_query(F.data == "menu_order")
 @instant_ack
 async def callback_order(callback):
 run_background(ensure_telegram_user(callback.from_user))
@@ -759,13 +757,13 @@ await callback.message.answer(
 parse_mode=ParseMode.HTML,
 reply_markup=order_category_kb(),
 )
-@router.callback_query(_(CATEGORY_CALLBACKS))
+@router.callback_query(F.data.in_(CATEGORY_CALLBACKS))
 @instant_ack
 async def callback_order_category(callback):
 category_code = callback.data.replace("order_", "", 1)
 reset_order_session(callback.from_user.id, category_code)
 await send_order_step(callback.message, callback.from_user.id)
-@router.callback_query( == "order_skip")
+@router.callback_query(F.data == "order_skip")
 @instant_ack
 async def callback_order_skip(callback):
 session = get_order_session(callback.from_user.id)
@@ -777,14 +775,14 @@ if step and step.get("skip"):
 session["answers"][step["key"]] = "Пропустить"
 session["step"] += 1
 await send_order_step(callback.message, callback.from_user.id)
-@router.callback_query( == "order_back")
+@router.callback_query(F.data == "order_back")
 @instant_ack
 async def callback_order_back(callback):
 session = get_order_session(callback.from_user.id)
 if session:
 session["step"] = max(2, int(session.get("step", 2)) - 1)
 await send_order_step(callback.message, callback.from_user.id)
-@router.callback_query( == "order_style_back")
+@router.callback_query(F.data == "order_style_back")
 @instant_ack
 async def callback_order_style_back(callback):
 session = get_order_session(callback.from_user.id)
@@ -815,20 +813,20 @@ return
 hours = callback.data.replace("order_deadline_", "", 1)
 session["answers"]["deadline"] = f"{hours} ч."
 await callback.message.answer(build_review_text(session), parse_mode=ParseMode.HTML, reply_markup=order_review_kb())
-@router.callback_query( == "order_show_review")
+@router.callback_query(F.data == "order_show_review")
 @instant_ack
 async def callback_order_show_review(callback):
 session = get_order_session(callback.from_user.id)
 if session:
 await callback.message.answer(build_review_text(session), parse_mode=ParseMode.HTML, reply_markup=order_review_kb())
-@router.callback_query( == "order_restart")
+@router.callback_query(F.data == "order_restart")
 @instant_ack
 async def callback_order_restart(callback):
 session = get_order_session(callback.from_user.id)
 if session:
 reset_order_session(callback.from_user.id, session["category"])
 await send_order_step(callback.message, callback.from_user.id)
-@router.callback_query( == "order_confirm")
+@router.callback_query(F.data == "order_confirm")
 @instant_ack
 async def callback_order_confirm(callback):
 session = get_order_session(callback.from_user.id)
@@ -857,7 +855,7 @@ session = get_order_session(callback.from_user.id)
 if session:
 await create_order_invoice(callback.message, session, callback.from_user)
 return
-order_id = callback_order_id()
+order_id = callback_order_id(callback.data)
 if order_id:
 order = await db.get_order(order_id)
 if order:
@@ -866,7 +864,7 @@ await create_order_invoice_for_persisted_order(callback.message, order, callback
 @instant_ack
 async def callback_order_pay_card(callback):
 session = get_order_session(callback.from_user.id)
-order_id = session.get("order_id") if session else callback_order_id()
+order_id = session.get("order_id") if session else callback_order_id(callback.data)
 await callback.message.answer(
 "Оплата банковской картой\n\n"
 "Напиши дизайнеру в Telegram для получения актуальных реквизитов. После оплаты отправь чек через кнопку «Отправить чек».",
@@ -877,13 +875,13 @@ reply_markup=order_payment_kb(order_id),
 @instant_ack
 async def callback_order_paid(callback):
 session = get_order_session(callback.from_user.id)
-order_id = session.get("order_id") if session else callback_order_id()
+order_id = session.get("order_id") if session else callback_order_id(callback.data)
 order_number = session.get("order_number") if session else order_id
 if order_id:
 try:
 await db.update_order(order_id, {"status": "payment_review"})
 await notify_admin(
-,
+callback.bot,
 "Клиент отметил оплату\n\n"
 f"Заказ: {escape(str(order_number))}\n"
 f"Клиент: {callback.from_user.id}\n"
@@ -899,7 +897,7 @@ reply_markup=order_payment_kb(order_id),
 @instant_ack
 async def callback_order_receipt(callback):
 session = get_order_session(callback.from_user.id)
-order_id = session.get("order_id") if session else callback_order_id()
+order_id = session.get("order_id") if session else callback_order_id(callback.data)
 SESSIONS[callback.from_user.id] = {
 "mode": "receipt_waiting",
 "order_id": order_id,
@@ -907,7 +905,7 @@ SESSIONS[callback.from_user.id] = {
 "db_user_id": session.get("db_user_id") if session else None,
 }
 await callback.message.answer("Пришли чек файлом, фото или текстом. Я сохраню его в заявке.")
-@router.callback_query( == "menu_profile")
+@router.callback_query(F.data == "menu_profile")
 @instant_ack
 async def callback_profile(callback):
 loading = await callback.message.answer("Открываю профиль...")
@@ -936,7 +934,7 @@ f"— Баланс: {money(balance)}\n"
 f"— Активно: {len(active_orders)}"
 )
 await loading.edit_text(text=profile_text, parse_mode=ParseMode.HTML, reply_markup=profile_kb())
-@router.callback_query( == "profile_deposit")
+@router.callback_query(F.data == "profile_deposit")
 @instant_ack
 async def callback_deposit(callback):
 await callback.message.answer(
@@ -945,7 +943,7 @@ await callback.message.answer(
 parse_mode=ParseMode.HTML,
 reply_markup=deposit_kb(),
 )
-@router.callback_query( == "deposit_manual")
+@router.callback_query(F.data == "deposit_manual")
 @instant_ack
 async def callback_deposit_manual(callback):
 SESSIONS[callback.from_user.id] = {"mode": "deposit_manual"}
@@ -972,7 +970,7 @@ status = STATUS_LABELS.get(order.get("status"), order.get("status", "—"))
 amount = money(order.get("total_amount") or 0)
 lines.append(f"\n{escape(str(order_num))}\n{escape(str(service))}\n{amount} — {escape(str(status))}")
 return "\n".join(lines)
-@router.callback_query( == "profile_orders")
+@router.callback_query(F.data == "profile_orders")
 @instant_ack
 async def callback_orders(callback):
 orders = await db.get_user_orders(callback.from_user.id)
@@ -982,7 +980,7 @@ build_orders_text("История заказов", completed_or_all),
 parse_mode=ParseMode.HTML,
 reply_markup=orders_kb(),
 )
-@router.callback_query( == "profile_active_orders")
+@router.callback_query(F.data == "profile_active_orders")
 @instant_ack
 async def callback_active_orders(callback):
 orders = await db.get_user_orders(callback.from_user.id)
@@ -992,7 +990,7 @@ build_orders_text("Активные заказы", active_orders),
 parse_mode=ParseMode.HTML,
 reply_markup=orders_kb(),
 )
-@router.callback_query( == "back_to_menu")
+@router.callback_query(F.data == "back_to_menu")
 @instant_ack
 async def callback_back_to_menu(callback):
 SESSIONS.pop(callback.from_user.id, None)
@@ -1032,9 +1030,9 @@ receipt_text = message.text or message.caption or "Клиент отправил
 attachment_url = None
 if message.document:
 attachment_url = message.document.file_id
-elif :
+elif message.photo:
 attachment_url = message.photo[-1].file_id
-elif :
+elif message.video:
 attachment_url = message.video.file_id
 if order_id:
 try:
@@ -1047,7 +1045,7 @@ text=receipt_text,
 attachment_url=attachment_url,
 )
 await notify_admin(
-,
+message.bot,
 "Клиент отправил чек\n\n"
 f"Заказ: {escape(str(order_number))}\n"
 f"Клиент: {message.from_user.id}\n"
@@ -1077,37 +1075,26 @@ session["answers"][step["key"]] = text
 session["step"] = step_number + 1
 await send_order_step(message, user_id)
 
-=== ТОЧКА ВХОДА FASTAPI ДЛЯ VERCEL ===
+Настройка роутинга событий для FastAPI
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 dp.include_router(router)
-@("/")
+@app.post("/")
 async def telegram_webhook(request: Request):
-"""Принимает входящие обновления от Telegram."""
+"""Прием обновлений от серверов Telegram через вебхук."""
 json_data = await request.json()
 update = Update.model_validate(json_data, context={"bot": bot})
 await dp.feed_update(bot, update)
 return {"status": "ok"}
 
----
+### Порядок действий для запуска:
+1. Замените файлы в вашем репозитории на эти три конфигурации.
+2. Перейдите в панель Vercel и добавьте все ваши секретные токены (`TELEGRAM_BOT_TOKEN`, `CRYPTOPAY_API_TOKEN`, ключи Supabase) во вкладке **Settings -> Environment Variables**.
+3. Запустите новый **Redeploy**. Сборка пройдет успешно.
+4. Откройте любой браузер и один раз активируйте вебхук, перейдя по ссылке:
+   `https://telegram.org<ТВОЙ_ТОКЕН_БОТА>/setWebhook?url=https://<ТВОЙ_АДРЕС_НА_VERCEL>.vercel.app/`
 
-### 2. Конфигурация `vercel.json`
-Создай файл `vercel.json` в корне твоего проекта (там же, где лежит `main.py`) и добавь в него следующие настройки:
-
-```json
-{
-  "version": 2,
-  "builds": [
-    {
-      "src": "main.py",
-      "use": "@vercel/python"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "main.py"
-    }
-  ]
-}
+<FollowUp>
+Если у вас возникнут сложности со связыванием переменных окружения или установкой вебхука — **напишите мне**, мы сразу проверим корректность ответа серверов Telegram!
+</FollowUp>
