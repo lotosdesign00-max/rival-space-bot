@@ -22,13 +22,15 @@ load_dotenv(Path(__file__).with_name(".env"))
 from fastapi import FastAPI, Request, Response
 from aiocryptopay import AioCryptoPay
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import FSInputFile, Message, Update
+from aiogram.types import FSInputFile, Message, PreCheckoutQuery, Update
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 from database import db
+from app_api import app_api, AppApiError, APP_URL
 from kb import (
+    order_in_app_kb,
     main_menu_kb,
     profile_kb,
     deposit_kb,
@@ -625,12 +627,72 @@ async def run_supabase_diagnostics(telegram_id: int) -> str:
             logger.exception("Could not clean diagnostic rows")
 
 
-async def create_deposit_invoice(message: Message, user_id: int, amount: Decimal):
+DEPOSIT_WATCH: dict[str, asyncio.Task] = {}
+
+
+async def check_deposit(user, invoice_id: str, notify_bot: Bot | None = None) -> str:
+    """paid / pending / expired / error. Оплаченный счёт зачисляется на баланс приложения (один раз)."""
+    try:
+        invoice = await get_cryptopay().get_invoices(invoice_ids=int(invoice_id))
+        if isinstance(invoice, list):
+            invoice = invoice[0] if invoice else None
+    except Exception:
+        logger.exception("CryptoBot getInvoices failed for %s", invoice_id)
+        return "error"
+    if not invoice:
+        return "error"
+    status = str(getattr(invoice, "status", "")).split(".")[-1].lower()
+    if status == "expired":
+        return "expired"
+    if status != "paid":
+        return "pending"
+    amount = float(getattr(invoice, "amount", 0) or 0)
+    try:
+        res = await app_api.credit(user, amount, f"cryptobot:{invoice_id}")
+    except AppApiError as exc:
+        logger.error("Could not credit invoice %s: %s", invoice_id, exc)
+        return "error"
+    task = DEPOSIT_WATCH.pop(str(invoice_id), None)
+    if task and task is not asyncio.current_task():
+        task.cancel()
+    if not res.get("already"):
+        balance = safe_decimal(res.get("balanceRub")) / Decimal(os.getenv("USD_RUB_RATE", "90"))
+        await (notify_bot or bot).send_message(
+            user.id,
+            f"✅ <b>Баланс пополнен на {usd(amount)}</b>\n\nТекущий баланс: <b>{usd(round(balance, 2))}</b>. "
+            "Он общий с приложением — можно сразу оформлять заказ.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=order_in_app_kb(),
+        )
+    return "paid"
+
+
+async def watch_deposit(user, invoice_id: str):
+    """Сами следим за счётом ~30 минут — жать «проверить» не обязательно."""
+    try:
+        for _ in range(180):
+            await asyncio.sleep(10)
+            result = await check_deposit(user, invoice_id)
+            if result in ("paid", "expired"):
+                return
+    finally:
+        DEPOSIT_WATCH.pop(str(invoice_id), None)
+
+
+async def create_deposit_invoice(message: Message, user, amount: Decimal):
+    if not CRYPTOPAY_TOKEN:
+        await message.answer("Оплата через CryptoBot сейчас выключена. Пополни баланс в приложении.", reply_markup=deposit_kb(False))
+        return
+    if not app_api.enabled:
+        await message.answer("Пополнение в боте временно недоступно. Пополни баланс в приложении.", reply_markup=deposit_kb(False))
+        return
     try:
         invoice = await get_cryptopay().create_invoice(
             asset=CRYPTOPAY_ASSET,
             amount=float(amount),
-            description=f"Пополнение Rival Space: {amount} {CRYPTOPAY_ASSET}",
+            description=f"Пополнение баланса Rival Space: {amount} {CRYPTOPAY_ASSET}",
+            payload=f"tg:{user.id}",
+            expires_in=3600,
         )
         pay_url = invoice_url(invoice)
         if not pay_url:
@@ -638,23 +700,16 @@ async def create_deposit_invoice(message: Message, user_id: int, amount: Decimal
         await message.answer(
             "<b>Счёт на пополнение создан</b>\n\n"
             f"Сумма: <b>{amount} {CRYPTOPAY_ASSET}</b>\n"
-            "Открой оплату через кнопку ниже.",
+            "После оплаты баланс в приложении пополнится автоматически.",
             parse_mode=ParseMode.HTML,
-            reply_markup=payment_kb(pay_url),
+            reply_markup=payment_kb(pay_url, invoice.invoice_id),
         )
-        user = await db.get_user(user_id)
-        if user:
-            await db.create_payment(
-                user_id=user["id"],
-                amount=amount,
-                invoice_id=str(invoice.invoice_id),
-                pay_url=pay_url,
-            )
+        DEPOSIT_WATCH[str(invoice.invoice_id)] = run_background(watch_deposit(user, str(invoice.invoice_id)))
     except Exception as e:
         logger.exception("Failed to create deposit invoice: %s", e)
         await message.answer(
-            "Не удалось создать счёт CryptoBot. Проверь токен CryptoPay или попробуй позже.",
-            reply_markup=back_to_menu_kb(),
+            "Не удалось создать счёт CryptoBot. Попробуй позже или пополни баланс в приложении.",
+            reply_markup=deposit_kb(False),
         )
 
 
@@ -759,17 +814,29 @@ async def create_order_invoice_for_persisted_order(message: Message, order: dict
 
 # ---------------------------------------------------------------- команды
 
+async def sync_app_user(user, ref: str | None = None):
+    """Заводим/обновляем аккаунт в приложении (там же засчитывается реферал)."""
+    if not app_api.enabled:
+        return
+    try:
+        await app_api.start(user, ref)
+    except AppApiError as exc:
+        logger.warning("App sync failed for %s: %s", user.id, exc)
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     SESSIONS.pop(message.from_user.id, None)
-    run_background(ensure_telegram_user(message.from_user))
+    parts = (message.text or "").split(maxsplit=1)
+    ref = parts[1].strip() if len(parts) > 1 else None
+    run_background(sync_app_user(message.from_user, ref))
     await send_main_menu(message)
 
 
 @router.message(Command("menu"))
 async def cmd_menu(message: Message):
     SESSIONS.pop(message.from_user.id, None)
-    run_background(ensure_telegram_user(message.from_user))
+    run_background(sync_app_user(message.from_user))
     await send_main_menu(message)
 
 
@@ -809,12 +876,14 @@ async def cmd_admin_test(message: Message):
 @router.callback_query(F.data == "menu_order")
 @instant_ack
 async def callback_order(callback):
-    run_background(ensure_telegram_user(callback.from_user))
+    """Заказы оформляются в приложении — так они сразу в профиле, в админке и в чате с дизайнером."""
+    SESSIONS.pop(callback.from_user.id, None)
     await callback.message.answer(
-        "<b>Выбери направление заказа</b>\n\n"
-        "Нажми на нужный тип работы — дальше откроется оформление заказа.",
+        "<b>Новый заказ</b>\n\n"
+        "Выбери услугу и пакет, опиши задачу и прикрепи исходники — всё в приложении, это займёт пару минут. "
+        "Заказ сразу появится в профиле, а дизайнер напишет тебе в чат заказа.",
         parse_mode=ParseMode.HTML,
-        reply_markup=order_category_kb(),
+        reply_markup=order_in_app_kb(),
     )
 
 
@@ -994,46 +1063,69 @@ async def callback_order_receipt(callback):
 
 # ---------------------------------------------------------------- профиль и баланс
 
+def usd(value) -> str:
+    amount = safe_decimal(value)
+    return f"${amount:,.2f}".replace(",", " ") if amount != amount.to_integral() else f"${int(amount):,}".replace(",", " ")
+
+
+async def load_profile(user) -> dict | None:
+    try:
+        return await app_api.profile(user)
+    except AppApiError as exc:
+        logger.warning("Profile load failed for %s: %s", user.id, exc)
+        return None
+
+
+PROFILE_UNAVAILABLE = (
+    "Не получилось загрузить профиль из приложения. Открой его кнопкой ниже — там всё на месте."
+)
+
+
 @router.callback_query(F.data == "menu_profile")
 @instant_ack
 async def callback_profile(callback):
     loading = await callback.message.answer("Открываю профиль...")
-    user = None
-    orders = []
-    try:
-        user = await db.get_user(callback.from_user.id)
-        if not user:
-            user = await ensure_telegram_user(callback.from_user)
-        if user:
-            orders = await db.get_user_orders_for_user_id(user["id"])
-    except Exception:
-        logger.exception("Could not load profile data for user_id=%s", callback.from_user.id)
-    completed_orders = [order for order in orders if order.get("status") in {"delivered", "closed"}]
-    active_orders = [order for order in orders if order.get("status") in ACTIVE_STATUSES]
-    total_amount = sum(safe_decimal(order.get("total_amount")) for order in completed_orders)
-    balance = safe_decimal(user.get("balance") if user else 0)
-    username = escape(callback.from_user.username or callback.from_user.first_name or "client")
-    profile_text = (
-        f"<b>Профиль — @{username}</b>\n\n"
-        f"Аккаунт: клиент @{PUBLIC_BOT_USERNAME}\n\n"
-        "<b>Активность:</b>\n"
-        f"— Выполнено заказов: {len(completed_orders)}\n"
-        f"— Общая сумма: {money(total_amount)}\n"
-        f"— Баланс: {money(balance)}\n"
-        f"— Активно: {len(active_orders)}"
-    )
-    await loading.edit_text(text=profile_text, parse_mode=ParseMode.HTML, reply_markup=profile_kb())
+    data = await load_profile(callback.from_user)
+    if not data:
+        await loading.edit_text(PROFILE_UNAVAILABLE, reply_markup=profile_kb())
+        return
+    u = data["user"]
+    orders = data.get("orders") or []
+    active = [o for o in orders if o.get("active")]
+    done = [o for o in orders if o.get("status") == "done"]
+    unread = int(data.get("unreadMessages") or 0)
+    name = escape(callback.from_user.username or u.get("firstName") or "client")
+    lines = [
+        f"<b>Профиль — @{name}</b>",
+        "",
+        f"Баланс: <b>{usd(u.get('balanceUsd'))}</b>",
+        f"Stardust: <b>{int(u.get('stardust') or 0):,} ✦</b>".replace(",", " "),
+        f"Опыт: {int(u.get('xp') or 0)} XP",
+        "",
+        "<b>Заказы</b>",
+        f"— В работе: {len(active)}",
+        f"— Выполнено: {len(done)}",
+    ]
+    if u.get("promoPercent"):
+        lines.append(f"\nПромокод: −{u['promoPercent']}% на следующий заказ")
+    if unread:
+        lines.append(f"\n💬 Новых сообщений: <b>{unread}</b>")
+    lines.append("\n<i>Это тот же аккаунт, что и в приложении: баланс и заказы общие.</i>")
+    await loading.edit_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=profile_kb(unread))
 
 
 @router.callback_query(F.data == "profile_deposit")
 @instant_ack
 async def callback_deposit(callback):
-    await callback.message.answer(
+    crypto = bool(CRYPTOPAY_TOKEN)
+    text = (
         "<b>Пополнение баланса</b>\n\n"
-        "Выбери готовую сумму или введи свою вручную. После этого я создам счёт CryptoBot.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=deposit_kb(),
+        "Баланс общий с приложением.\n"
+        "• <b>В приложении</b> — карта, Telegram Stars или крипта.\n"
     )
+    if crypto:
+        text += f"• <b>Здесь, через CryptoBot</b> — выбери сумму в {CRYPTOPAY_ASSET}, зачисление автоматически.\n"
+    await callback.message.answer(text, parse_mode=ParseMode.HTML, reply_markup=deposit_kb(crypto))
 
 
 @router.callback_query(F.data == "deposit_manual")
@@ -1041,7 +1133,7 @@ async def callback_deposit(callback):
 async def callback_deposit_manual(callback):
     SESSIONS[callback.from_user.id] = {"mode": "deposit_manual"}
     await callback.message.answer(
-        "Введи сумму пополнения в USDT одним сообщением.\n\nНапример: <code>7.5</code>",
+        f"Введи сумму пополнения в {CRYPTOPAY_ASSET} одним сообщением.\n\nНапример: <code>7.5</code>",
         parse_mode=ParseMode.HTML,
     )
 
@@ -1051,53 +1143,65 @@ async def callback_deposit_manual(callback):
 async def callback_deposit_amount(callback):
     amount = parse_amount(callback.data.split("_", 1)[1])
     if amount is None:
-        await callback.message.answer("Не понял сумму. Попробуй ещё раз.", reply_markup=deposit_kb())
+        await callback.message.answer("Не понял сумму. Попробуй ещё раз.", reply_markup=deposit_kb(bool(CRYPTOPAY_TOKEN)))
     else:
-        await create_deposit_invoice(callback.message, callback.from_user.id, amount)
+        await create_deposit_invoice(callback.message, callback.from_user, amount)
+
+
+@router.callback_query(F.data.startswith("depcheck_"))
+@instant_ack
+async def callback_deposit_check(callback):
+    invoice_id = callback.data.split("_", 1)[1]
+    result = await check_deposit(callback.from_user, invoice_id)
+    if result == "pending":
+        await callback.message.answer("Оплата пока не пришла. Если уже оплатил — подожди минуту, зачислю автоматически.")
+    elif result == "expired":
+        await callback.message.answer("Счёт истёк. Создай новый в «Пополнить баланс».")
+    elif result == "error":
+        await callback.message.answer("Не смог проверить оплату — попробуй ещё раз через минуту.")
 
 
 def build_orders_text(title: str, orders: list[dict]) -> str:
     if not orders:
-        return f"<b>{title}</b>\n\nПока здесь пусто. Как только появится заказ, он будет отображаться в этом разделе."
+        return f"<b>{title}</b>\n\nПока здесь пусто. Новые заказы оформляются в приложении — они сразу появятся тут."
     lines = [f"<b>{title}</b>"]
     for order in orders[:10]:
-        order_num = order.get("order_number", "—")
-        service = order.get("service_name") or order.get("title") or "Заказ"
-        status = STATUS_LABELS.get(order.get("status"), order.get("status", "—"))
-        amount = money(order.get("total_amount") or 0)
-        lines.append(f"\n<b>{escape(str(order_num))}</b>\n{escape(str(service))}\n{amount} — {escape(str(status))}")
+        name = order.get("title") or order.get("service") or "Заказ"
+        service = order.get("service")
+        lines.append(
+            f"\n<b>#{order.get('id')}</b> · {escape(str(name))}"
+            + (f"\n{escape(str(service))}" if service and service != name else "")
+            + f"\n{usd(order.get('totalUsd'))} — {escape(str(order.get('statusLabel') or order.get('status')))}"
+        )
     return "\n".join(lines)
 
 
 @router.callback_query(F.data == "profile_orders")
 @instant_ack
 async def callback_orders(callback):
-    orders = await db.get_user_orders(callback.from_user.id)
-    completed_or_all = [order for order in orders if order.get("status") not in ACTIVE_STATUSES]
-    await callback.message.answer(
-        build_orders_text("История заказов", completed_or_all),
-        parse_mode=ParseMode.HTML,
-        reply_markup=orders_kb(),
-    )
+    data = await load_profile(callback.from_user)
+    if not data:
+        await callback.message.answer(PROFILE_UNAVAILABLE, reply_markup=orders_kb())
+        return
+    history = [o for o in data.get("orders") or [] if not o.get("active")]
+    await callback.message.answer(build_orders_text("История заказов", history), parse_mode=ParseMode.HTML, reply_markup=orders_kb())
 
 
 @router.callback_query(F.data == "profile_active_orders")
 @instant_ack
 async def callback_active_orders(callback):
-    orders = await db.get_user_orders(callback.from_user.id)
-    active_orders = [order for order in orders if order.get("status") in ACTIVE_STATUSES]
-    await callback.message.answer(
-        build_orders_text("Активные заказы", active_orders),
-        parse_mode=ParseMode.HTML,
-        reply_markup=orders_kb(),
-    )
+    data = await load_profile(callback.from_user)
+    if not data:
+        await callback.message.answer(PROFILE_UNAVAILABLE, reply_markup=orders_kb())
+        return
+    active = [o for o in data.get("orders") or [] if o.get("active")]
+    await callback.message.answer(build_orders_text("Активные заказы", active), parse_mode=ParseMode.HTML, reply_markup=orders_kb())
 
 
 @router.callback_query(F.data == "back_to_menu")
 @instant_ack
 async def callback_back_to_menu(callback):
     SESSIONS.pop(callback.from_user.id, None)
-    run_background(ensure_telegram_user(callback.from_user))
     await send_main_menu(callback.message)
 
 
@@ -1115,6 +1219,33 @@ async def callback_unknown(callback):
         )
 
 
+# ---------------------------------------------------------------- Telegram Stars (оплата в мини-аппе)
+
+@router.pre_checkout_query()
+async def on_pre_checkout(query: PreCheckoutQuery):
+    """Telegram ждёт ответ ≤10 сек, иначе оплата Stars в мини-аппе падает."""
+    ok = (query.invoice_payload or "").startswith("topup:")
+    try:
+        await query.answer(ok=ok, error_message=None if ok else "Счёт устарел — создай новый в приложении")
+    except Exception:
+        logger.exception("pre_checkout answer failed")
+
+
+@router.message(F.successful_payment)
+async def on_successful_payment(message: Message):
+    sp = message.successful_payment
+    payload = sp.invoice_payload or ""
+    if not payload.startswith("topup:"):
+        return
+    try:
+        res = await app_api.stars(message.from_user, payload)
+        if not res.get("already"):
+            await message.answer("✅ Оплата прошла — баланс в приложении пополнен.", reply_markup=order_in_app_kb())
+    except AppApiError as exc:
+        # не страшно: приложение само подтвердит платёж через getStarTransactions
+        logger.warning("Stars credit via app failed: %s", exc)
+
+
 # ---------------------------------------------------------------- текстовые ответы
 
 @router.message()
@@ -1130,7 +1261,7 @@ async def handle_text_state(message: Message):
             await message.answer("Введи корректную сумму числом, например: 12.5")
             return
         SESSIONS.pop(user_id, None)
-        await create_deposit_invoice(message, user_id, amount)
+        await create_deposit_invoice(message, message.from_user, amount)
         return
 
     if session.get("mode") == "receipt_waiting":
@@ -1203,6 +1334,10 @@ WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or hashlib.sha256(BOT_TOKEN.encode
 
 
 async def close_clients():
+    try:
+        await app_api.close()
+    except Exception:
+        logger.exception("Could not close app api client")
     """Аккуратно закрываем HTTP-сессии, чтобы не было 'Unclosed client session'."""
     global cryptopay
     if cryptopay is not None:

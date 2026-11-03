@@ -2,13 +2,19 @@
 import os
 from pathlib import Path
 
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).with_name(".env"))
 
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://rivaldesign.app")
+# адрес мини-аппа (Vercel). APP_URL — основной, WEBAPP_URL — старое имя переменной
+WEBAPP_URL = (os.getenv("APP_URL") or os.getenv("WEBAPP_URL") or "https://rival-space.vercel.app").rstrip("/")
+
+
+def app_button(text: str, path: str = "/") -> InlineKeyboardButton:
+    """Кнопка, открывающая мини-апп прямо в Telegram на нужной странице."""
+    return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=WEBAPP_URL + path))
 PORTFOLIO_URL = os.getenv("PORTFOLIO_URL", "https://t.me/rivalportfolio")
 PRICES_URL = os.getenv("PRICES_URL", "https://t.me/rivalportfolio/4")
 BLOG_URL = os.getenv("BLOG_URL", os.getenv("SERVICES_URL", "https://t.me/+a7SsFZHmCaJiNDMy"))
@@ -19,7 +25,8 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     """Main menu keyboard in the reference style."""
     builder = InlineKeyboardBuilder()
 
-    builder.row(InlineKeyboardButton(text="Оставить заказ", callback_data="menu_order"))
+    builder.row(app_button("Открыть Rival Space", "/"))
+    builder.row(app_button("Оставить заказ", "/order"))
     builder.row(InlineKeyboardButton(text="Мой профиль", callback_data="menu_profile"))
     builder.row(
         InlineKeyboardButton(text="Портфолио", url=PORTFOLIO_URL),
@@ -33,41 +40,53 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def profile_kb() -> InlineKeyboardMarkup:
-    """Profile keyboard."""
+def profile_kb(unread: int = 0) -> InlineKeyboardMarkup:
+    """Профиль: всё ведёт в одно и то же приложение."""
     builder = InlineKeyboardBuilder()
-
     builder.row(InlineKeyboardButton(text="Пополнить баланс", callback_data="profile_deposit"))
-    builder.row(InlineKeyboardButton(text="История заказов", callback_data="profile_orders"))
-    builder.row(InlineKeyboardButton(text="Активные заказы", callback_data="profile_active_orders"))
+    builder.row(
+        InlineKeyboardButton(text="Активные заказы", callback_data="profile_active_orders"),
+        InlineKeyboardButton(text="История", callback_data="profile_orders"),
+    )
+    if unread:
+        builder.row(app_button(f"Сообщения · {unread}", "/support"))
+    builder.row(app_button("Открыть профиль в приложении", "/profile"))
     builder.row(InlineKeyboardButton(text="Назад", callback_data="back_to_menu"))
-
     return builder.as_markup()
 
 
-def deposit_kb() -> InlineKeyboardMarkup:
-    """Deposit keyboard with amount options."""
+def deposit_kb(crypto_enabled: bool = True) -> InlineKeyboardMarkup:
+    """Пополнение: в приложении (карта / Stars / крипта) или CryptoBot прямо в боте."""
     builder = InlineKeyboardBuilder()
-
-    builder.row(
-        InlineKeyboardButton(text="5 USDT", callback_data="deposit_5"),
-        InlineKeyboardButton(text="10 USDT", callback_data="deposit_10"),
-    )
-    builder.row(
-        InlineKeyboardButton(text="25 USDT", callback_data="deposit_25"),
-        InlineKeyboardButton(text="50 USDT", callback_data="deposit_50"),
-    )
-    builder.row(InlineKeyboardButton(text="Ввести вручную", callback_data="deposit_manual"))
+    builder.row(app_button("Пополнить в приложении", "/profile?topup=1"))
+    if crypto_enabled:
+        builder.row(
+            InlineKeyboardButton(text="5 USDT", callback_data="deposit_5"),
+            InlineKeyboardButton(text="10 USDT", callback_data="deposit_10"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="25 USDT", callback_data="deposit_25"),
+            InlineKeyboardButton(text="50 USDT", callback_data="deposit_50"),
+        )
+        builder.row(InlineKeyboardButton(text="Другая сумма (USDT)", callback_data="deposit_manual"))
     builder.row(InlineKeyboardButton(text="Назад", callback_data="menu_profile"))
-
     return builder.as_markup()
 
 
 def orders_kb() -> InlineKeyboardMarkup:
-    """Orders history keyboard."""
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Назад", callback_data="menu_profile")
-    ]])
+    """Под списком заказов."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [app_button("Открыть заказы в приложении", "/profile")],
+        [InlineKeyboardButton(text="Назад", callback_data="menu_profile")],
+    ])
+
+
+def order_in_app_kb() -> InlineKeyboardMarkup:
+    """Заказ теперь оформляется только в приложении — так он сразу виден в админке и в профиле."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [app_button("Оформить заказ", "/order")],
+        [InlineKeyboardButton(text="Главное меню", callback_data="back_to_menu")],
+    ])
 
 
 def order_category_kb() -> InlineKeyboardMarkup:
@@ -173,9 +192,10 @@ def back_to_menu_kb() -> InlineKeyboardMarkup:
     ]])
 
 
-def payment_kb(pay_url: str) -> InlineKeyboardMarkup:
-    """Deposit payment keyboard."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Открыть оплату", url=pay_url)],
-        [InlineKeyboardButton(text="Назад", callback_data="profile_deposit")],
-    ])
+def payment_kb(pay_url: str, invoice_id: int | str | None = None) -> InlineKeyboardMarkup:
+    """Счёт CryptoBot на пополнение."""
+    rows = [[InlineKeyboardButton(text="Оплатить", url=pay_url)]]
+    if invoice_id is not None:
+        rows.append([InlineKeyboardButton(text="Я оплатил — проверить", callback_data=f"depcheck_{invoice_id}")])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="profile_deposit")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
